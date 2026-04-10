@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>マンホールカードマップ</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css"/>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+}
+
+#map {
+    height: 100vh;
+    width: 100%;
+}
+
+.leaflet-popup-content {
+    margin: 10px !important;
+    width: auto !important;
+    max-width: 90vw !important;
+}
+
+.leaflet-popup-content-wrapper {
+    max-width: 92vw !important;
+}
+
+/* マーカー */
+.marker-img {
+    width: 60px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 2px solid #333;
+    transition: 0.2s;
+}
+
+/* popup */
+.popup-card {
+    width: 480px;
+    max-width: 92vw;
+    overflow: hidden;
+}
+
+.popup-top {
+    display: flex;
+    gap: 12px;
+}
+
+.popup-top img {
+    width: 150px;
+    max-height: 180px;
+    object-fit: contain;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+}
+
+.popup-info {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+}
+
+.popup-section {
+    margin-bottom: 8px;
+}
+
+.popup-section b {
+    display: block;
+}
+
+.popup-note {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid #ddd;
+    font-size: 12px;
+}
+
+.leaflet-tooltip {
+    background: white;
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+
+/* クラスタの見た目（数字） */
+.marker-cluster div {
+    background: #333;
+    color: #fff;
+    border-radius: 50%;
+    font-weight: bold;
+}
+</style>
+</head>
+
+<body>
+<div id="map"></div>
+
+<script>
+
+const placeURL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRYtou0MibuY3jV_TBqmVcyXR0oSwgg2HOy0OKtCaL9gE-jBOoauUIlI-iBgKCqGrnODSnNE33Gcx7G/pub?gid=126360071&single=true&output=csv";
+const conditionURL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRYtou0MibuY3jV_TBqmVcyXR0oSwgg2HOy0OKtCaL9gE-jBOoauUIlI-iBgKCqGrnODSnNE33Gcx7G/pub?gid=563860884&single=true&output=csv";
+
+function loadCSV(url) {
+    return new Promise(resolve => {
+        Papa.parse(url, {
+            download: true,
+            header: true,
+            skipEmptyLines: true,
+            complete: res => resolve(res.data)
+        });
+    });
+}
+
+function fixUrl(url) {
+    return url ? url.replace("http://", "https://") : "";
+}
+
+function buildAddress(p) {
+    return [
+        p["都道府県"],
+        p["市区町村"],
+        p["地名以下"],
+        p["ビル名"]
+    ].filter(Boolean).join("");
+}
+
+// 営業時間
+function formatCondition(rows) {
+    const days = ["月","火","水","木","金","土","日","祝"];
+    let map = {};
+    let activeAll = new Set();
+
+    rows.forEach(r => {
+        const start = r["開始時刻"];
+        const end = r["終了時刻"];
+        if (!start || !end) return;
+
+        let active = [];
+        days.forEach(d => {
+            if (r[d] === "〇" || r[d] === "○") {
+                active.push(d);
+                activeAll.add(d);
+            }
+        });
+
+        const key = active.join("・");
+        if (!map[key]) map[key] = [];
+        map[key].push(`${start}～${end}`);
+    });
+
+    return Object.entries(map)
+        .map(([k,v]) => `${k}：${v.join("、")}`)
+        .join("<br>");
+}
+
+function getClosedDays(rows) {
+    const days = ["月","火","水","木","金","土","日","祝"];
+    let open = new Set();
+
+    rows.forEach(r => {
+        days.forEach(d => {
+            if (r[d] === "〇" || r[d] === "○") open.add(d);
+        });
+    });
+
+    const closed = days.filter(d => !open.has(d));
+    return closed.length ? closed.join("・") : "なし";
+}
+
+async function init() {
+
+    const placeData = await loadCSV(placeURL);
+    const conditionData = await loadCSV(conditionURL);
+
+    const conditionMap = {};
+    conditionData.forEach(r => {
+        const key = r["画像URL"];
+        if (!conditionMap[key]) conditionMap[key] = [];
+        conditionMap[key].push(r);
+    });
+
+    const map = L.map('map').setView([35.5, 135.5], 6);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png')
+        .addTo(map);
+
+    // ★クラスタ
+    const markers = L.markerClusterGroup();
+
+    placeData.forEach(p => {
+
+        const lat = parseFloat(p["緯度"]);
+        const lng = parseFloat(p["経度"]);
+        if (isNaN(lat) || isNaN(lng)) return;
+
+        const img = fixUrl(p["画像URL"]);
+        const conditions = conditionMap[p["画像URL"]] || [];
+        const address = buildAddress(p);
+
+        const popupHTML = `
+        <div class="popup-card">
+            <div class="popup-top">
+                <img src="${img}">
+                <div class="popup-info">
+
+                    <div class="popup-section">
+                        <b>施設名</b>
+                        <a href="${p["リンク"] || '#'}" target="_blank" style="color:#007bff;text-decoration:underline;">
+                            ${p["施設名"] || ""}
+                        </a>
+                    </div>
+
+                    <div class="popup-section">
+                        <b>住所</b>
+                        <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}"
+                        target="_blank"
+                        style="color:#007bff;text-decoration:underline;">
+                            ${address}
+                        </a>
+                    </div>
+
+                    <div class="popup-section">
+                        <b>営業時間</b>
+                        ${formatCondition(conditions)}
+                    </div>
+
+                    <div class="popup-section">
+                        <b>定休日</b>
+                        ${getClosedDays(conditions)}
+                    </div>
+
+                </div>
+            </div>
+
+            ${p["備考"] ? `
+            <div class="popup-note">
+                <b>備考</b><br>
+                ${p["備考"]}
+            </div>
+            ` : ""}
+
+        </div>
+        `;
+
+        const icon = L.divIcon({
+            html: `<img src="${img}" class="marker-img">`,
+            className: ""
+        });
+
+        const marker = L.marker([lat, lng], { icon })
+            .bindPopup(popupHTML)
+            .bindTooltip(p["市区町村"] || "", {
+                direction: "top",
+                offset: [0, -10]
+            });
+
+        markers.addLayer(marker);
+    });
+
+    map.addLayer(markers);
+
+    // ズームで拡大
+    function updateMarkerSize() {
+        const zoom = map.getZoom();
+
+        let size;
+        if (zoom <= 6) size = 40;
+        else if (zoom <= 8) size = 50;
+        else if (zoom <= 10) size = 60;
+        else if (zoom <= 12) size = 70;
+        else size = 80;
+
+        document.querySelectorAll(".marker-img").forEach(img => {
+            img.style.width = size + "px";
+            img.style.height = (size * 1.39) + "px";
+        });
+    }
+
+    map.on("zoomend", updateMarkerSize);
+    updateMarkerSize();
+}
+
+init();
+
+</script>
+
+</body>
+</html>
